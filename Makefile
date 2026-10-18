@@ -8,7 +8,7 @@ TARGET    := $(BUILD_DIR)/monitor.elf
 CFLAGS := -march=rv64imac_zicsr -mabi=lp64 -mcmodel=medany \
           -ffreestanding -fno-builtin -nostdlib -fno-pie -no-pie \
           -O1 -g -Wall -Wextra -Iinclude
-LDFLAGS := -T linker.ld -nostdlib
+LDFLAGS := -T linker.ld -nostdlib -Wl,--no-warn-rwx-segments
 
 SOURCES_C := $(wildcard src/*.c)
 SOURCES_S := $(wildcard src/*.S)
