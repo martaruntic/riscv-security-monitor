@@ -1,5 +1,7 @@
 #include "trap.h"
 #include "mcall.h"
+#include "memory_rules.h"
+#include "secure_storage.h"
 #include "platform.h"
 #include "riscv.h"
 #include "uart.h"
@@ -88,29 +90,83 @@ static void print_trap_info(struct trap_frame *frame)
     uart_puts("\n");
 }
 
-// a7 = call number, a0 = argument, result goes back in a0
+// a7 = call number, a0/a1 = arguments.
+// Result: a0 = status, a1 = value (same idea as the SBI calling convention).
 static void handle_mcall(struct trap_frame *frame)
 {
     uint64_t call_number = frame->regs[17];
-    uint64_t argument = frame->regs[10];
+    uint64_t first_argument = frame->regs[10];
+    uint64_t second_argument = frame->regs[11];
+    uint64_t result_value = 0;
+    long status;
 
     switch (call_number) {
     case MCALL_PUTCHAR:
-        uart_putc((char)argument);
-        frame->regs[10] = MCALL_OK;
+        uart_putc((char)first_argument);
+        status = MCALL_OK;
         break;
 
     case MCALL_SHUTDOWN:
         uart_puts("[monitor] supervisor asked for shutdown, code ");
-        uart_put_dec(argument);
+        uart_put_dec(first_argument);
         uart_puts("\n");
-        platform_poweroff((uint32_t)argument);
+        platform_poweroff((uint32_t)first_argument);
+        return;
+
+    case MCALL_SECURE_READ:
+        status = secure_storage_read(first_argument, &result_value);
+        break;
+
+    case MCALL_SECURE_WRITE:
+        status = secure_storage_write(first_argument, second_argument);
+        break;
+
+    case MCALL_SECRET_VERIFY:
+        status = secure_storage_verify_secret(first_argument, &result_value);
         break;
 
     default:
-        frame->regs[10] = (uint64_t)MCALL_UNKNOWN_CALL;
+        status = MCALL_UNKNOWN_CALL;
         break;
     }
+
+    frame->regs[10] = (uint64_t)status;
+    frame->regs[11] = result_value;
+}
+
+static int is_access_fault(uint64_t cause)
+{
+    return cause == CAUSE_FETCH_ACCESS ||
+           cause == CAUSE_LOAD_ACCESS ||
+           cause == CAUSE_STORE_ACCESS;
+}
+
+// A lower privilege mode touched memory that PMP doesn't allow.
+// The supervisor is not trusted, so the monitor doesn't try to recover it,
+// it logs what happened and stops the machine.
+static void handle_access_violation(struct trap_frame *frame)
+{
+    const char *access_type = "store";
+
+    if (frame->mcause == CAUSE_FETCH_ACCESS)
+        access_type = "instruction fetch";
+    else if (frame->mcause == CAUSE_LOAD_ACCESS)
+        access_type = "load";
+
+    uart_puts("[monitor] ACCESS VIOLATION from ");
+    uart_puts(previous_mode_name(frame->mstatus));
+    uart_puts("-mode\n");
+    uart_puts("          type:    ");
+    uart_puts(access_type);
+    uart_puts("\n          address: ");
+    uart_put_hex(frame->mtval);
+    uart_puts(" (");
+    uart_puts(memory_rules_region_name(frame->mtval));
+    uart_puts(")\n          pc:      ");
+    uart_put_hex(frame->mepc);
+    uart_puts("\n[monitor] supervisor stopped\n");
+
+    platform_poweroff(EXIT_ACCESS_VIOLATION);
 }
 
 void trap_handler(struct trap_frame *frame)
@@ -129,6 +185,11 @@ void trap_handler(struct trap_frame *frame)
     if (frame->mcause == CAUSE_ECALL_FROM_S) {
         handle_mcall(frame);
         frame->mepc += 4;   // ecall is always 4 bytes
+        return;
+    }
+
+    if (!from_machine_mode && is_access_fault(frame->mcause)) {
+        handle_access_violation(frame);
         return;
     }
 

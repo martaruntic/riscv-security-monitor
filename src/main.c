@@ -2,9 +2,13 @@
 #include "uart.h"
 #include "trap.h"
 #include "pmp.h"
+#include "memory_rules.h"
+#include "secure_storage.h"
 
 extern char __monitor_start[];
 extern char __monitor_end[];
+extern char __secure_start[];
+extern char __secure_end[];
 extern char __supervisor_start[];
 extern char __supervisor_end[];
 extern char supervisor_entry[];
@@ -29,6 +33,10 @@ static void report_platform(void)
     uart_put_hex((uint64_t)__monitor_start);
     uart_puts(" - ");
     uart_put_hex((uint64_t)__monitor_end);
+    uart_puts("\nsecure region:   ");
+    uart_put_hex((uint64_t)__secure_start);
+    uart_puts(" - ");
+    uart_put_hex((uint64_t)__secure_end);
     uart_puts("\nsupervisor:      ");
     uart_put_hex((uint64_t)__supervisor_start);
     uart_puts(" - ");
@@ -68,19 +76,6 @@ static void test_trap_path(void)
         uart_puts("[monitor] register was changed by the trap handler!\n");
 }
 
-// When PMP exists, S-mode and U-mode can't touch any memory that no entry
-// allows. For now the last entry opens the whole address space, so the
-// supervisor can run. Protected regions will go into lower entries later,
-// since the lowest matching entry always wins.
-static void pmp_allow_everything(void)
-{
-    int last_entry = pmp.entry_count - 1;
-
-    // NAPOT with all ones covers the whole address space
-    pmp_write_addr(last_entry, ~0UL);
-    pmp_write_cfg(last_entry, PMP_A_NAPOT | PMP_R | PMP_W | PMP_X);
-}
-
 // mret jumps to mepc and switches to the mode stored in mstatus.MPP
 static void enter_supervisor(void *entry_point)
 {
@@ -115,8 +110,18 @@ void monitor_main(void)
         halt();
     }
 
-    pmp_allow_everything();
-    uart_puts("[monitor] pmp setup:\n");
+    secure_storage_init();
+    memory_rules_init();
+
+    uart_puts("[monitor] memory rules:\n");
+    memory_rules_print();
+
+    if (memory_rules_apply(&pmp) != 0) {
+        uart_puts("[monitor] failed to set up PMP, halting\n");
+        halt();
+    }
+
+    uart_puts("[monitor] pmp entries:\n");
     pmp_print_entries(pmp.entry_count);
 
     uart_puts("[monitor] dropping to S-mode at ");
