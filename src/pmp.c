@@ -131,9 +131,63 @@ void pmp_probe(struct pmp_info *info)
     info->granularity = 1UL << (trailing_zeros + 2);
 }
 
+#define PMP_A_MASK (3 << 3)
+
+void pmp_clear_all(int entry_count)
+{
+    for (int i = 0; i < entry_count; i++) {
+        pmp_write_cfg(i, PMP_A_OFF);
+        pmp_write_addr(i, 0);
+    }
+}
+
+static int is_power_of_two(uint64_t value)
+{
+    return value != 0 && (value & (value - 1)) == 0;
+}
+
+// Adds one region starting at entry "index" and returns the next free
+// entry, or -1 if the region can't be described or there is no space.
+//
+// A power of two region aligned to its size fits in one NAPOT entry.
+// Anything else needs TOR: entry i holds the start, entry i+1 the end
+// with the permissions. pmpaddr always stores the address shifted by 2.
+int pmp_add_region(const struct pmp_info *info, int index,
+                   uint64_t base, uint64_t size, uint8_t permissions)
+{
+    uint64_t alignment_mask = info->granularity - 1;
+
+    if (size == 0 || ((base | size) & alignment_mask) != 0)
+        return -1;
+
+    if (size >= 8 && is_power_of_two(size) && (base & (size - 1)) == 0) {
+        if (index >= info->entry_count)
+            return -1;
+        // low bits set to 1 encode the size: 011..1 means size = 2^(ones+3)
+        pmp_write_addr(index, (base | (size / 2 - 1)) >> 2);
+        pmp_write_cfg(index, PMP_A_NAPOT | permissions);
+        return index + 1;
+    }
+
+    if (index + 1 >= info->entry_count)
+        return -1;
+    pmp_write_addr(index, base >> 2);
+    pmp_write_cfg(index, PMP_A_OFF);
+    pmp_write_addr(index + 1, (base + size) >> 2);
+    pmp_write_cfg(index + 1, PMP_A_TOR | permissions);
+    return index + 2;
+}
+
+// The spec says to run sfence.vma after changing PMP, because the hart is
+// allowed to cache address translations that already passed a PMP check.
+void pmp_flush(void)
+{
+    __asm__ volatile("sfence.vma zero, zero" ::: "memory");
+}
+
 static const char *address_mode_name(uint8_t cfg)
 {
-    switch (cfg & (3 << 3)) {
+    switch (cfg & PMP_A_MASK) {
     case PMP_A_TOR:   return "TOR  ";
     case PMP_A_NA4:   return "NA4  ";
     case PMP_A_NAPOT: return "NAPOT";
@@ -141,20 +195,51 @@ static const char *address_mode_name(uint8_t cfg)
     }
 }
 
+// Turns pmpaddr back into a byte range, so the printout is readable
+static void decode_range(int index, uint8_t cfg, uint64_t *start, uint64_t *end)
+{
+    uint64_t value = pmp_read_addr(index);
+    int trailing_ones = 0;
+
+    switch (cfg & PMP_A_MASK) {
+    case PMP_A_TOR:
+        *start = (index == 0) ? 0 : pmp_read_addr(index - 1) << 2;
+        *end = value << 2;
+        break;
+    case PMP_A_NA4:
+        *start = value << 2;
+        *end = *start + 4;
+        break;
+    case PMP_A_NAPOT:
+        while (trailing_ones < 62 && ((value >> trailing_ones) & 1))
+            trailing_ones++;
+        *start = (value & ~((1UL << trailing_ones) - 1)) << 2;
+        *end = *start + (1UL << (trailing_ones + 3));
+        break;
+    default:
+        *start = 0;
+        *end = 0;
+    }
+}
+
 void pmp_print_entries(int entry_count)
 {
     for (int i = 0; i < entry_count; i++) {
         uint8_t cfg = pmp_read_cfg(i);
+        uint64_t start, end;
 
-        if ((cfg & (3 << 3)) == PMP_A_OFF)
+        if ((cfg & PMP_A_MASK) == PMP_A_OFF)
             continue;
 
+        decode_range(i, cfg, &start, &end);
         uart_puts("  pmp");
         uart_put_dec(i);
-        uart_puts(": ");
+        uart_puts(i < 10 ? ":  " : ": ");
         uart_puts(address_mode_name(cfg));
-        uart_puts(" addr=");
-        uart_put_hex(pmp_read_addr(i));
+        uart_puts(" ");
+        uart_put_hex(start);
+        uart_puts(" - ");
+        uart_put_hex(end);
         uart_puts(" ");
         uart_putc((cfg & PMP_R) ? 'r' : '-');
         uart_putc((cfg & PMP_W) ? 'w' : '-');

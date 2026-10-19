@@ -29,4 +29,9 @@ void pmp_write_cfg(int index, uint8_t cfg);
 void pmp_probe(struct pmp_info *info);
 void pmp_print_entries(int entry_count);
 
+void pmp_clear_all(int entry_count);
+int pmp_add_region(const struct pmp_info *info, int index,
+                   uint64_t base, uint64_t size, uint8_t permissions);
+void pmp_flush(void);
+
 #endif
