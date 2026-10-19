@@ -35,7 +35,7 @@ $(BUILD_DIR):
 	mkdir -p $(BUILD_DIR)
 
 run: $(TARGET)
-	$(QEMU) $(QEMU_FLAGS) -kernel $(TARGET)
+	-$(QEMU) $(QEMU_FLAGS) -kernel $(TARGET); echo "qemu exit code: $$?"
 
 # Starts QEMU halted and waits for gdb on port 1234
 debug: $(TARGET)
