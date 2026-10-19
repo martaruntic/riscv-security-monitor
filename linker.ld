@@ -5,6 +5,7 @@ ENTRY(_start)
  * Memory map (QEMU virt, -bios none):
  *
  *   0x80000000  monitor (M-mode): code, data, monitor stack, trap stack
+ *   0x80100000  secure region: data only the monitor can touch
  *   0x80200000  supervisor (S-mode): code, data, supervisor stack
  *
  * Everything from a file whose name starts with "supervisor" goes into the
@@ -57,6 +58,20 @@ SECTIONS
 
     . = ALIGN(4096);
     __monitor_end = .;
+
+    ASSERT(__monitor_end <= 0x80100000, "monitor runs into the secure region")
+
+    /* ---------------- secure region ---------------- */
+    /* NOLOAD: nothing is loaded here, the monitor fills it at boot.
+       4 KiB and aligned to 4 KiB, so it fits in one NAPOT PMP entry. */
+    .secure 0x80100000 (NOLOAD) : {
+        __secure_start = .;
+        *(.secure .secure.*)
+        . = ALIGN(4096);
+        __secure_end = .;
+    }
+
+    ASSERT(__secure_end <= 0x80200000, "secure region runs into the supervisor")
 
     /* ---------------- supervisor ---------------- */
     . = 0x80200000;

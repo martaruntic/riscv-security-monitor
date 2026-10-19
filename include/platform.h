@@ -9,8 +9,13 @@
 #define TEST_DEVICE_PASS 0x5555
 #define TEST_DEVICE_FAIL 0x3333
 
-// Where the untrusted supervisor code is linked (see linker.ld)
-#define SUPERVISOR_BASE 0x80200000UL
+// Fixed addresses, must match linker.ld
+#define SECURE_REGION_BASE 0x80100000UL
+#define SUPERVISOR_BASE    0x80200000UL
+
+// QEMU exit code when the monitor stops the supervisor because of an
+// access violation (0 means the supervisor asked for a normal shutdown)
+#define EXIT_ACCESS_VIOLATION 3
 
 static inline void platform_poweroff(uint32_t exit_code)
 {
