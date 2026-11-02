@@ -2,13 +2,26 @@ CROSS_PREFIX ?= riscv64-unknown-elf-
 CC      := $(CROSS_PREFIX)gcc
 OBJDUMP := $(CROSS_PREFIX)objdump
 
+# make run ATTACK=read_secure_region builds the supervisor with that attack.
+# Each attack gets its own build directory so builds don't mix.
+ATTACK ?=
+
+ifeq ($(ATTACK),)
 BUILD_DIR := build
-TARGET    := $(BUILD_DIR)/monitor.elf
+else
+BUILD_DIR := build/attack-$(ATTACK)
+endif
+
+TARGET := $(BUILD_DIR)/monitor.elf
 
 CFLAGS := -march=rv64imac_zicsr -mabi=lp64 -mcmodel=medany \
           -ffreestanding -fno-builtin -nostdlib -fno-pie -no-pie \
-          -O1 -g -Wall -Wextra -Iinclude
+          -O1 -g -Wall -Wextra -Iinclude -MMD -MP
 LDFLAGS := -T linker.ld -nostdlib -Wl,--no-warn-rwx-segments
+
+ifneq ($(ATTACK),)
+CFLAGS += -DATTACK_NAME='"$(ATTACK)"'
+endif
 
 SOURCES_C := $(wildcard src/*.c)
 SOURCES_S := $(wildcard src/*.S)
@@ -18,7 +31,7 @@ OBJECTS   := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SOURCES_C)) \
 QEMU       := qemu-system-riscv64
 QEMU_FLAGS := -machine virt -cpu rv64 -smp 1 -m 128M -nographic -bios none
 
-.PHONY: all run debug dump clean
+.PHONY: all run test debug dump clean
 
 all: $(TARGET)
 
@@ -37,6 +50,10 @@ $(BUILD_DIR):
 run: $(TARGET)
 	-$(QEMU) $(QEMU_FLAGS) -kernel $(TARGET); echo "qemu exit code: $$?"
 
+# Builds and runs every attack, checks that each one is stopped
+test:
+	./tests/run_attacks.sh
+
 # Starts QEMU halted and waits for gdb on port 1234
 debug: $(TARGET)
 	$(QEMU) $(QEMU_FLAGS) -kernel $(TARGET) -s -S
@@ -45,4 +62,6 @@ dump: $(TARGET)
 	$(OBJDUMP) -d $(TARGET) > $(BUILD_DIR)/monitor.asm
 
 clean:
-	rm -rf $(BUILD_DIR)
+	rm -rf build
+
+-include $(OBJECTS:.o=.d)
