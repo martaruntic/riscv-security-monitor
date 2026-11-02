@@ -18,7 +18,7 @@ Work in progress.
 - [x] Dropping to S-mode, monitor calls through `ecall`
 - [x] PMP rules that protect the monitor and a secure region (default deny)
 - [x] Secure storage with per-slot access policy
-- [ ] Attack tests (illegal reads, writes, executes)
+- [x] Attack tests (20 attacks, run with `make test`)
 - [ ] Evaluation and limitations
 
 ## Design
@@ -129,6 +129,79 @@ the address belongs to, the pc, and stops the machine with QEMU exit code 3.
 qemu exit code: 3
 ```
 
+### Privilege violations
+
+If the supervisor runs an instruction that S-mode is not allowed to run
+(writing an M-mode CSR, `mret`), the hart raises an illegal instruction
+exception. The monitor logs the instruction bits (QEMU puts them in `mtval`)
+and stops the machine with exit code 4. Any other exception from the
+supervisor stops it with exit code 5, so a broken supervisor never leaves
+QEMU hanging.
+
+## Attack tests
+
+`src/supervisor_attacks.c` has a list of things a compromised supervisor
+could try. Each attack is built into its own image and booted on its own,
+because a blocked attack stops the machine:
+
+```
+make run ATTACK=read_secure_region   # run one attack
+make test                            # run all of them and check the results
+```
+
+`tests/run_attacks.sh` knows the expected QEMU exit code of every attack and
+a line that has to show up in the log. If an attack gets through, the
+supervisor reports it itself and exits with code 1.
+
+| attack                   | what it tries                               | stopped by          | exit |
+|--------------------------|---------------------------------------------|---------------------|------|
+| `legitimate_calls`       | allowed calls (sanity check, must work)     | -                   | 0    |
+| `read_monitor_code`      | load from monitor code                      | PMP, load fault     | 3    |
+| `write_trap_stack`       | store to the monitor trap stack             | PMP, store fault    | 3    |
+| `overwrite_trap_vector`  | replace the first trap handler instruction  | PMP, store fault    | 3    |
+| `jump_into_monitor`      | execute monitor code in S-mode              | PMP, fetch fault    | 3    |
+| `read_secure_region`     | load the secret directly                    | PMP, load fault     | 3    |
+| `write_secure_region`    | overwrite the secret directly               | PMP, store fault    | 3    |
+| `execute_secure_region`  | jump into the secure region                 | PMP, fetch fault    | 3    |
+| `write_uart_directly`    | print without going through the monitor     | PMP, store fault    | 3    |
+| `poweroff_directly`      | power off QEMU through the test device      | PMP, store fault    | 3    |
+| `read_unmapped_ram`      | load RAM that no rule covers                | PMP, load fault     | 3    |
+| `alias_through_paging`   | map the secret at a second virtual address  | PMP, load fault     | 3    |
+| `write_pmp_config`       | `csrw pmpcfg0`                              | illegal instruction | 4    |
+| `write_mtvec`            | `csrw mtvec`                                | illegal instruction | 4    |
+| `read_mscratch`          | `csrr mscratch` (trap stack address)        | illegal instruction | 4    |
+| `mret_from_supervisor`   | `mret` in S-mode                            | illegal instruction | 4    |
+| `brute_force_secret`     | 3 wrong guesses, then the right secret      | lockout             | 0    |
+| `bad_slot_index`         | slot 4, -1, 2^63, 0x1000                    | argument check      | 0    |
+| `unknown_call_numbers`   | call numbers 0, 6, 1000, -1                 | argument check      | 0    |
+| `trap_uses_caller_stack` | `ecall` with `sp` pointing to a canary      | separate trap stack | 0    |
+
+Result on QEMU 8.2: 20 of 20 attacks stopped.
+
+To check that the tests can actually fail, the secure rule was changed to
+`rwx` for one run. `read_secure_region` and `write_secure_region` then
+reported success (exit 1), `execute_secure_region` ran into zeroed memory
+(illegal instruction, exit 4), and `alias_through_paging` read the secret
+too. The script reported 4 failures, as it should.
+
+### Notes from testing
+
+- **Paging does not get around PMP.** The supervisor controls `satp` and its
+  own page tables. In `alias_through_paging` it maps physical RAM at a second
+  virtual address and reads the secret through it. PMP checks the physical
+  address after translation, so the read still faults. `mtval` holds the
+  virtual address (`0xc0100010`), which is why the monitor can't name the
+  region in that log. The page table walk itself is allowed, because the
+  table lives in supervisor memory.
+- **The first version of `overwrite_trap_vector` faulted on a load, not a
+  store.** `trap_vector` was declared as `char[]`, so the compiler did not
+  know it was aligned and turned the 32-bit store into byte accesses that
+  start with a load. PMP stopped it either way, but the test was not testing
+  what it said. Declaring it as `uint32_t[]` gives a single `sw`.
+- **The trap stack design holds.** During an `ecall` with `sp` pointing to a
+  buffer full of a known pattern, the buffer stays unchanged, so the monitor
+  never touches the caller's stack.
+
 ## Platform findings (QEMU 8.2, `virt`, `-cpu rv64`)
 
 Measured by the monitor at boot:
@@ -158,13 +231,23 @@ sudo apt install gcc-riscv64-unknown-elf qemu-system-misc
 ```
 make        # builds build/monitor.elf
 make run    # boots it in QEMU and prints the exit code at the end
+make test   # runs all attacks (see "Attack tests")
 make debug  # starts QEMU halted, waiting for gdb on :1234
 make dump   # writes the disassembly to build/monitor.asm
 ```
 
-QEMU exit codes: `0` the supervisor shut down normally, `3` the monitor
-stopped it because of an access violation. If something hangs, exit QEMU with
-Ctrl-A then X.
+QEMU exit codes:
+
+| code | meaning                                                  |
+|------|----------------------------------------------------------|
+| 0    | the supervisor shut down normally                        |
+| 1    | an attack got through                                    |
+| 2    | unknown `ATTACK` name                                    |
+| 3    | the monitor stopped the supervisor: access violation     |
+| 4    | the monitor stopped the supervisor: privilege violation  |
+| 5    | the monitor stopped the supervisor: other exception      |
+
+If something hangs, exit QEMU with Ctrl-A then X.
 
 ## Layout
 
@@ -179,6 +262,8 @@ src/memory_rules.c       memory rules and turning them into PMP entries
 src/secure_storage.c     secure storage and its access policy
 src/uart.c               NS16550A UART driver
 src/supervisor_entry.S   S-mode entry point
-src/supervisor.c         untrusted S-mode code
+src/supervisor.c         untrusted S-mode code, demo
+src/supervisor_attacks.c attacks against the monitor
+tests/run_attacks.sh     runs every attack and checks the result
 linker.ld                memory layout of the monitor, secure region and supervisor
 ```
