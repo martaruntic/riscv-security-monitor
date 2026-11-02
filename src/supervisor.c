@@ -1,19 +1,18 @@
 // Code that runs in S-mode. This plays the role of an untrusted kernel:
 // it is linked separately from the monitor (see linker.ld) and it can only
 // talk to the monitor through ecall.
+//
+// Built normally it runs a short demo. Built with ATTACK=<name> it runs
+// one attack from supervisor_attacks.c instead.
 
 #include <stdint.h>
 #include "mcall.h"
 #include "platform.h"
 #include "secure_storage.h"
+#include "supervisor.h"
 
-struct mcall_result {
-    long status;
-    uint64_t value;
-};
-
-static struct mcall_result monitor_call(long call_number, uint64_t first_argument,
-                                        uint64_t second_argument)
+struct mcall_result monitor_call(long call_number, uint64_t first_argument,
+                                 uint64_t second_argument)
 {
     register uint64_t a0 __asm__("a0") = first_argument;
     register uint64_t a1 __asm__("a1") = second_argument;
@@ -27,12 +26,12 @@ static struct mcall_result monitor_call(long call_number, uint64_t first_argumen
     return result;
 }
 
-static void supervisor_putc(char c)
+void supervisor_putc(char c)
 {
     monitor_call(MCALL_PUTCHAR, c, 0);
 }
 
-static void supervisor_puts(const char *str)
+void supervisor_puts(const char *str)
 {
     while (*str) {
         if (*str == '\n')
@@ -41,7 +40,7 @@ static void supervisor_puts(const char *str)
     }
 }
 
-static void supervisor_put_hex(uint64_t value)
+void supervisor_put_hex(uint64_t value)
 {
     const char *digits = "0123456789abcdef";
 
@@ -50,7 +49,7 @@ static void supervisor_put_hex(uint64_t value)
         supervisor_putc(digits[(value >> shift) & 0xf]);
 }
 
-static const char *status_name(long status)
+const char *status_name(long status)
 {
     switch (status) {
     case MCALL_OK:               return "ok";
@@ -60,6 +59,13 @@ static const char *status_name(long status)
     case MCALL_LOCKED_OUT:       return "locked out";
     default:                     return "?";
     }
+}
+
+void supervisor_shutdown(uint32_t exit_code)
+{
+    monitor_call(MCALL_SHUTDOWN, exit_code, 0);
+    while (1)
+        ;
 }
 
 static void print_status(const char *what, struct mcall_result result)
@@ -137,14 +143,24 @@ static void read_secure_memory_directly(void)
     supervisor_puts("\n");
 }
 
-void supervisor_main(void)
+static void run_demo(void)
 {
-    supervisor_puts("[supervisor] hello from S-mode\n");
-
     use_secure_storage();
     guess_secret();
     read_secure_memory_directly();
 
     supervisor_puts("[supervisor] done, asking monitor to shut down\n");
-    monitor_call(MCALL_SHUTDOWN, 0, 0);
+    supervisor_shutdown(EXIT_OK);
+}
+
+void supervisor_main(void)
+{
+    supervisor_puts("[supervisor] hello from S-mode\n");
+
+#ifdef ATTACK_NAME
+    run_attack(ATTACK_NAME);
+    supervisor_shutdown(EXIT_UNKNOWN_ATTACK);
+#else
+    run_demo();
+#endif
 }
