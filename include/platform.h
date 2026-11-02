@@ -13,9 +13,14 @@
 #define SECURE_REGION_BASE 0x80100000UL
 #define SUPERVISOR_BASE    0x80200000UL
 
-// QEMU exit code when the monitor stops the supervisor because of an
-// access violation (0 means the supervisor asked for a normal shutdown)
-#define EXIT_ACCESS_VIOLATION 3
+// QEMU exit codes. 0 and 1 come from the supervisor itself through
+// MCALL_SHUTDOWN, the others are used when the monitor stops it.
+#define EXIT_OK                  0   // supervisor finished normally
+#define EXIT_ATTACK_SUCCEEDED    1   // supervisor got past a protection
+#define EXIT_UNKNOWN_ATTACK      2   // ATTACK name not found
+#define EXIT_ACCESS_VIOLATION    3   // PMP blocked a memory access
+#define EXIT_PRIVILEGE_VIOLATION 4   // illegal instruction in S-mode
+#define EXIT_SUPERVISOR_CRASH    5   // any other exception in S-mode
 
 static inline void platform_poweroff(uint32_t exit_code)
 {

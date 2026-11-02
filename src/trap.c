@@ -169,6 +169,34 @@ static void handle_access_violation(struct trap_frame *frame)
     platform_poweroff(EXIT_ACCESS_VIOLATION);
 }
 
+// The supervisor ran an instruction its privilege level doesn't allow,
+// like writing an M-mode CSR or executing mret. On QEMU mtval holds the
+// instruction bits, so the log shows exactly what was tried.
+static void handle_privilege_violation(struct trap_frame *frame)
+{
+    uart_puts("[monitor] PRIVILEGE VIOLATION from ");
+    uart_puts(previous_mode_name(frame->mstatus));
+    uart_puts("-mode\n");
+    uart_puts("          type:    illegal instruction\n");
+    uart_puts("          instr:   ");
+    uart_put_hex(frame->mtval);
+    uart_puts("\n          pc:      ");
+    uart_put_hex(frame->mepc);
+    uart_puts("\n[monitor] supervisor stopped\n");
+
+    platform_poweroff(EXIT_PRIVILEGE_VIOLATION);
+}
+
+// Anything else that goes wrong in the supervisor (page fault, misaligned
+// access, ...). It is not the monitor's job to fix it, but the machine
+// should not just hang either.
+static void handle_supervisor_crash(struct trap_frame *frame)
+{
+    print_trap_info(frame);
+    uart_puts("[monitor] unhandled exception in the supervisor, stopping it\n");
+    platform_poweroff(EXIT_SUPERVISOR_CRASH);
+}
+
 void trap_handler(struct trap_frame *frame)
 {
     int from_machine_mode = (frame->mstatus & MSTATUS_MPP_MASK) == MSTATUS_MPP_M;
@@ -190,6 +218,16 @@ void trap_handler(struct trap_frame *frame)
 
     if (!from_machine_mode && is_access_fault(frame->mcause)) {
         handle_access_violation(frame);
+        return;
+    }
+
+    if (!from_machine_mode && frame->mcause == CAUSE_ILLEGAL_INSTRUCTION) {
+        handle_privilege_violation(frame);
+        return;
+    }
+
+    if (!from_machine_mode && frame->mcause != CAUSE_BREAKPOINT) {
+        handle_supervisor_crash(frame);
         return;
     }
 
