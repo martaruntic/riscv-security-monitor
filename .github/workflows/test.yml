@@ -1,0 +1,37 @@
+name: attack tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install RISC-V toolchain and QEMU
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-riscv64-unknown-elf qemu-system-misc
+
+      - name: Show versions
+        run: |
+          riscv64-unknown-elf-gcc --version | head -1
+          qemu-system-riscv64 --version | head -1
+
+      - name: Build
+        run: make
+
+      - name: Run all attacks
+        run: make test
+
+      - name: Lines of code
+        run: make loc
+
+      - name: Upload QEMU logs
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: qemu-logs
+          path: build/attack-*/qemu.log
