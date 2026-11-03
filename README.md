@@ -1,16 +1,21 @@
 # riscv-security-monitor
 
 A small security monitor for RISC-V that runs in machine mode and uses
-Physical Memory Protection (PMP) to isolate a protected memory region from
-less privileged software running on the same hart.
+Physical Memory Protection (PMP) to keep a secure memory region and the
+monitor itself out of reach of the operating system kernel, even when that
+kernel is compromised.
 
-The goal is to explore the ideas behind trusted execution environments:
-privilege separation, memory isolation and a minimal trusted computing base,
-and to measure what this kind of isolation actually stops and what it does not.
+The goal is to explore the ideas behind trusted execution environments
+(privilege separation, memory isolation, a small trusted computing base) and
+to measure what this kind of isolation actually stops and what it does not.
+
+**Result on QEMU 8.2:** 20 attacks from a compromised kernel, all 20 stopped.
+Monitor size: 861 lines of code. One known limitation (no timer interrupt) is
+shown by a test as well.
 
 ## Status
 
-Work in progress.
+Finished prototype.
 
 - [x] Bare-metal boot in M-mode on QEMU `virt`, UART output
 - [x] Trap handling in the monitor (separate trap stack, full register save)
@@ -19,13 +24,36 @@ Work in progress.
 - [x] PMP rules that protect the monitor and a secure region (default deny)
 - [x] Secure storage with per-slot access policy
 - [x] Attack tests (20 attacks, run with `make test`)
-- [ ] Evaluation and limitations
+- [x] Evaluation: threat model, limitations, TCB size, CI
+
+## Threat model
+
+**Trusted:** the hardware (the RISC-V hart and its PMP) and the monitor, which
+is the only code in M-mode.
+
+**Not trusted:** the supervisor, which stands in for an operating system
+kernel in S-mode. It is assumed to be fully compromised: the attacker can run
+any code in S-mode, knows the monitor binary and every address in it, and
+controls its own page tables.
+
+**Protected:**
+
+- confidentiality and integrity of the secure region (the secret can't be
+  read or changed)
+- integrity of the monitor (its code, data, stacks and trap handling can't
+  be changed or taken over)
+- the PMP configuration itself (the supervisor can't turn the rules off)
+- devices that only the monitor should use (UART, power off)
+
+**Not protected:** availability (the supervisor can keep the CPU forever),
+physical attacks, side channels and devices that access memory on their own
+(see [Limitations](#limitations)).
 
 ## Design
 
 ```
             +-----------------------------+
- M-mode     |  monitor                    |  0x80000000
+ M-mode     |  monitor (trusted)          |  0x80000000
             |  trap handler, PMP setup,   |
             |  monitor calls              |
             +-----------------------------+
@@ -56,7 +84,7 @@ The supervisor gets access only to what a rule explicitly allows:
 |--------------|---------------------------|-------------------|
 | monitor      | `0x80000000 - 0x80007000` | none              |
 | secure       | `0x80100000 - 0x80101000` | none              |
-| supervisor   | `0x80200000 - 0x80203000` | `rwx`             |
+| supervisor   | `0x80200000 - 0x80206000` | `rwx`             |
 | anything else (UART, other RAM, devices) | | none          |
 
 The rules live in a table in `memory_rules.c` and the monitor turns them into
@@ -66,8 +94,11 @@ uses one NAPOT entry, anything else uses a pair of entries in TOR mode:
 ```
   pmp1:  TOR   0x80000000 - 0x80007000 ---
   pmp2:  NAPOT 0x80100000 - 0x80101000 ---
-  pmp4:  TOR   0x80200000 - 0x80203000 rwx
+  pmp4:  TOR   0x80200000 - 0x80206000 rwx
 ```
+
+The supervisor region is computed from the linker symbols, so it grows with
+the supervisor code (the attack code and its page table are linked in too).
 
 Deny rules are placed before allow rules. The lowest matching PMP entry wins,
 so a deny keeps working even if a wider allow rule is added later.
@@ -89,8 +120,9 @@ monitor checks a policy for each slot:
 | 3    | reserved          | none                              |
 
 A guess for the secret can be checked, but the secret itself is never
-returned. After 3 wrong guesses the check is locked until reboot, so the
-secret can't be found by trying values one by one.
+returned. After 3 wrong guesses in a row the check is locked until reboot,
+so the secret can't be found by trying values one by one. A right guess
+resets the counter.
 
 Every argument that comes from the supervisor (slot number, guess) is checked
 before use. Slot numbers are unsigned, so a "negative" slot is just a very
@@ -155,7 +187,6 @@ supervisor reports it itself and exits with code 1.
 
 | attack                   | what it tries                               | stopped by          | exit |
 |--------------------------|---------------------------------------------|---------------------|------|
-| `legitimate_calls`       | allowed calls (sanity check, must work)     | -                   | 0    |
 | `read_monitor_code`      | load from monitor code                      | PMP, load fault     | 3    |
 | `write_trap_stack`       | store to the monitor trap stack             | PMP, store fault    | 3    |
 | `overwrite_trap_vector`  | replace the first trap handler instruction  | PMP, store fault    | 3    |
@@ -176,7 +207,24 @@ supervisor reports it itself and exits with code 1.
 | `unknown_call_numbers`   | call numbers 0, 6, 1000, -1                 | argument check      | 0    |
 | `trap_uses_caller_stack` | `ecall` with `sp` pointing to a canary      | separate trap stack | 0    |
 
-Result on QEMU 8.2: 20 of 20 attacks stopped.
+Two more tests check that the protections don't get in the way of normal use:
+
+| test                  | what it checks                                         | exit |
+|-----------------------|--------------------------------------------------------|------|
+| `legitimate_calls`    | allowed reads and writes of secure storage work        | 0    |
+| `secret_verify_works` | the right secret is accepted, a match resets the count | 0    |
+
+And one test shows a known limitation instead of hiding it:
+
+| test           | what it does                              | result                     |
+|----------------|-------------------------------------------|----------------------------|
+| `spin_forever` | loops forever without calling the monitor | never stopped, QEMU timeout |
+
+Output of `make test`:
+
+```
+passed: 21, failed: 0, known limitations: 1
+```
 
 To check that the tests can actually fail, the secure rule was changed to
 `rwx` for one run. `read_secure_region` and `write_secure_region` then
@@ -201,6 +249,65 @@ too. The script reported 4 failures, as it should.
 - **The trap stack design holds.** During an `ecall` with `sp` pointing to a
   buffer full of a known pattern, the buffer stays unchanged, so the monitor
   never touches the caller's stack.
+- **A too short test timeout made one test flaky.** With a 5 second limit,
+  the first QEMU start after `make clean` sometimes did not finish in time.
+  The limit is now 15 seconds and can be changed with `QEMU_TIMEOUT`.
+
+## Trusted computing base
+
+Everything the security of the system depends on is the monitor. A bug
+anywhere in it could break the isolation, so it is kept small. Counted with
+`make loc` (no blank lines, no comment-only lines):
+
+| part                          | lines of code |
+|-------------------------------|---------------|
+| monitor (trusted)             | 861           |
+| supervisor (untrusted)        | 143           |
+| attacks (untrusted, test only)| 272           |
+
+The biggest monitor files are the trap handler (`trap.c`, 188) and the PMP
+code (`pmp.c`, 181). About 70 lines of `pmp.c` are only there to print PMP
+entries in a readable way.
+
+## Limitations
+
+This is a prototype, and the isolation only holds within the threat model
+above. Things it does not handle:
+
+- **One hart only.** Every hart has its own PMP registers. On a multi-core
+  system the monitor would have to set up PMP on every hart before any of
+  them runs supervisor code, otherwise a second core could read everything.
+- **No timer interrupt.** Once the supervisor runs, it never has to give the
+  CPU back to the monitor. `spin_forever` shows this. The monitor protects
+  secrecy and integrity, not availability.
+- **DMA.** PMP only checks accesses made by the hart. A device that can write
+  to memory on its own (DMA) is not checked by it. Protecting against that
+  needs an IOPMP or an IOMMU.
+- **Side channels.** PMP stops the access, but not timing or cache effects.
+  On a real out-of-order core, Spectre-style attacks against the monitor
+  would be a separate problem.
+- **PMP entries are not locked.** Without the `L` bit, a bug in the monitor
+  could change or remove its own rules. Locking them would also apply them to
+  M-mode, so the secure region would need its own design for how the monitor
+  reaches it.
+- **The secret is in the binary.** It is a constant in the source code for
+  the demo. A real system would take it from hardware (fuses, a key derived
+  at boot) and would need secure boot so the monitor itself can be trusted.
+- **No attestation.** Nobody outside the machine can check which monitor is
+  running.
+- **Lockout until reboot.** The secret is safe from guessing, but a
+  compromised supervisor can lock it on purpose. That is a denial of service
+  against legitimate users.
+- **QEMU is not real hardware.** All results are for QEMU 8.2 (`virt`,
+  `-cpu rv64`). Real chips can have a different number of PMP entries,
+  coarser granularity, and errata.
+
+## Future work
+
+- Set up PMP on every hart and test with `-smp 4`
+- Timer interrupt in the monitor so it can always take the CPU back
+- A small enclave in U-mode that the supervisor can't read either
+- Run the same tests on real hardware (for example a VisionFive 2)
 
 ## Platform findings (QEMU 8.2, `virt`, `-cpu rv64`)
 
@@ -215,10 +322,20 @@ entry allows. Without a single PMP entry the switch to S-mode fails right
 away with an instruction access fault (`mcause = 1`). QEMU reports it at the
 `mret` instruction itself and not at the supervisor entry address.
 
-## Requirements
+## Tools
 
-- `riscv64-unknown-elf-gcc` (bare-metal RISC-V toolchain)
-- `qemu-system-riscv64` (tested with QEMU 8.2)
+| tool                       | version | used for                                  |
+|----------------------------|---------|-------------------------------------------|
+| `riscv64-unknown-elf-gcc`  | 13.2.0  | compiling C and assembly, linking         |
+| `qemu-system-riscv64`      | 8.2.2   | running the monitor (`virt` machine)      |
+| GNU Make                   | 4.3     | build, run, test targets                  |
+| `gdb-multiarch`            |         | debugging through QEMU's gdb stub         |
+| Bash                       |         | test and line count scripts               |
+| GitHub Actions             |         | running `make test` on every push         |
+
+Developed on Ubuntu 24.04 under WSL 2 on Windows, with VS Code.
+
+## Requirements
 
 On Ubuntu/Debian:
 
@@ -232,6 +349,7 @@ sudo apt install gcc-riscv64-unknown-elf qemu-system-misc
 make        # builds build/monitor.elf
 make run    # boots it in QEMU and prints the exit code at the end
 make test   # runs all attacks (see "Attack tests")
+make loc    # lines of code of the monitor and the supervisor
 make debug  # starts QEMU halted, waiting for gdb on :1234
 make dump   # writes the disassembly to build/monitor.asm
 ```
@@ -256,7 +374,7 @@ include/                 headers
 src/start.S              entry point, stack and .bss setup
 src/main.c               monitor startup, switch to S-mode
 src/trap_entry.S         trap entry and exit, register save/restore
-src/trap.c               trap handler, monitor calls, access violations
+src/trap.c               trap handler, monitor calls, violations
 src/pmp.c                PMP CSR access, probing, region encoding
 src/memory_rules.c       memory rules and turning them into PMP entries
 src/secure_storage.c     secure storage and its access policy
@@ -265,5 +383,11 @@ src/supervisor_entry.S   S-mode entry point
 src/supervisor.c         untrusted S-mode code, demo
 src/supervisor_attacks.c attacks against the monitor
 tests/run_attacks.sh     runs every attack and checks the result
+tests/count_lines.sh     lines of code per part
 linker.ld                memory layout of the monitor, secure region and supervisor
+.github/workflows/       CI that runs make test
 ```
+
+## License
+
+MIT, see `LICENSE`.
