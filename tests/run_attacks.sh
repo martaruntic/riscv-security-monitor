@@ -8,16 +8,20 @@
 #   0  rejected by a monitor call check
 #   3  stopped by PMP (access violation)
 #   4  stopped as an illegal instruction (privilege violation)
+#   timeout  not stopped, known limitation (no timer interrupt yet)
 #
 # Usage: ./tests/run_attacks.sh            run all attacks
 #        ./tests/run_attacks.sh read_secure_region   run only this one
 
 cd "$(dirname "$0")/.." || exit 1
 
-QEMU_TIMEOUT=10
+# QEMU normally finishes in under a second, the limit is only for hangs.
+# Override with QEMU_TIMEOUT=30 make test on a slow machine.
+QEMU_TIMEOUT=${QEMU_TIMEOUT:-15}
 
 ATTACKS=(
     "legitimate_calls        0  allowed calls work"
+    "secret_verify_works     0  right secret accepted"
     "read_monitor_code       3  type:    load"
     "write_trap_stack        3  type:    store"
     "overwrite_trap_vector   3  type:    store"
@@ -37,11 +41,13 @@ ATTACKS=(
     "bad_slot_index          0  blocked"
     "unknown_call_numbers    0  blocked"
     "trap_uses_caller_stack  0  blocked"
+    "spin_forever      timeout  spinning"
 )
 
 ONLY_ATTACK="$1"
 passed=0
 failed=0
+known_limits=0
 
 printf "%-24s %-9s %-6s %s\n" "attack" "expected" "got" "result"
 printf "%-24s %-9s %-6s %s\n" "------" "--------" "---" "------"
@@ -67,7 +73,13 @@ for line in "${ATTACKS[@]}"; do
         > "$log_file" 2>&1 < /dev/null
     exit_code=$?
 
-    if [ "$exit_code" -eq 124 ]; then
+    if [ "$expected_code" = "timeout" ]; then
+        if [ "$exit_code" -eq 124 ] && grep -q "$expected_text" "$log_file"; then
+            result="ok (known limitation)"
+        else
+            result="FAIL (expected a timeout)"
+        fi
+    elif [ "$exit_code" -eq 124 ]; then
         result="FAIL (timeout)"
     elif [ "$exit_code" -ne "$expected_code" ]; then
         result="FAIL (wrong exit code)"
@@ -81,13 +93,15 @@ for line in "${ATTACKS[@]}"; do
 
     if [ "$result" = "ok" ]; then
         passed=$((passed + 1))
+    elif [ "$result" = "ok (known limitation)" ]; then
+        known_limits=$((known_limits + 1))
     else
         failed=$((failed + 1))
     fi
 done
 
 echo
-echo "passed: $passed, failed: $failed"
+echo "passed: $passed, failed: $failed, known limitations: $known_limits"
 echo "logs are in build/attack-<name>/qemu.log"
 
 [ "$failed" -eq 0 ]

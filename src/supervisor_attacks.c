@@ -85,6 +85,38 @@ static void legitimate_calls(void)
     supervisor_shutdown(EXIT_OK);
 }
 
+// The verify call must still work for someone who knows the secret.
+// Two wrong guesses, then the right one: it has to match, and the match
+// resets the counter, so two more wrong guesses don't lock it either.
+#define KNOWN_SECRET 0x3c5a7e19d24b8f61UL
+
+static void secret_verify_works(void)
+{
+    for (int round = 0; round < 2; round++) {
+        monitor_call(MCALL_SECRET_VERIFY, 1, 0);
+        monitor_call(MCALL_SECRET_VERIFY, 2, 0);
+
+        struct mcall_result result = monitor_call(MCALL_SECRET_VERIFY, KNOWN_SECRET, 0);
+        if (result.status != MCALL_OK || result.value != 1)
+            attack_succeeded("right secret was not accepted");
+    }
+
+    supervisor_puts("[attack] right secret accepted, counter resets after a match\n");
+    supervisor_shutdown(EXIT_OK);
+}
+
+// ---------------- known limitation ----------------
+
+// There is no timer interrupt in the monitor, so once the supervisor runs
+// it never has to give the CPU back. This is expected to hang and the
+// test script counts the timeout as the expected result.
+static void spin_forever(void)
+{
+    supervisor_puts("[attack] spinning without ever calling the monitor\n");
+    while (1)
+        ;
+}
+
 // ---------------- monitor memory ----------------
 
 static void read_monitor_code(void)
@@ -250,7 +282,7 @@ static void mret_from_supervisor(void)
 
 // Pretend the attacker learned the secret some other way. After the
 // lockout even the right value must not be accepted.
-#define STOLEN_SECRET 0x3c5a7e19d24b8f61UL
+#define STOLEN_SECRET KNOWN_SECRET
 
 static void brute_force_secret(void)
 {
@@ -330,6 +362,7 @@ static void trap_uses_caller_stack(void)
 
 static const struct attack attacks[] = {
     { "legitimate_calls",       "allowed monitor calls still work",      legitimate_calls },
+    { "secret_verify_works",    "the right secret is accepted",          secret_verify_works },
     { "read_monitor_code",      "load from monitor code",                read_monitor_code },
     { "write_trap_stack",       "store to the monitor trap stack",       write_trap_stack },
     { "overwrite_trap_vector",  "store to the trap handler code",        overwrite_trap_vector },
@@ -349,6 +382,7 @@ static const struct attack attacks[] = {
     { "bad_slot_index",         "out of range slot numbers",             bad_slot_index },
     { "unknown_call_numbers",   "monitor calls that don't exist",        unknown_call_numbers },
     { "trap_uses_caller_stack", "ecall with sp pointing to a canary",    trap_uses_caller_stack },
+    { "spin_forever",           "never give the CPU back (known limit)", spin_forever },
 };
 
 #define ATTACK_COUNT (sizeof(attacks) / sizeof(attacks[0]))
