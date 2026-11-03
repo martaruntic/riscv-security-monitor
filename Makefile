@@ -31,7 +31,7 @@ OBJECTS   := $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SOURCES_C)) \
 QEMU       := qemu-system-riscv64
 QEMU_FLAGS := -machine virt -cpu rv64 -smp 1 -m 128M -nographic -bios none
 
-.PHONY: all run test debug dump clean
+.PHONY: all run test loc debug dump clean
 
 all: $(TARGET)
 
@@ -53,6 +53,10 @@ run: $(TARGET)
 # Builds and runs every attack, checks that each one is stopped
 test:
 	./tests/run_attacks.sh
+
+# Lines of code of the monitor (the trusted part) and the supervisor
+loc:
+	./tests/count_lines.sh
 
 # Starts QEMU halted and waits for gdb on port 1234
 debug: $(TARGET)
